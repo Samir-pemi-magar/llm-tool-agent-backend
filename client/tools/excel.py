@@ -51,6 +51,23 @@ def summarize_column(file_path: str, column: str, operation: str, sheet_name: st
     except Exception as e:
         return {"error": str(e)}
 
+def get_rows_by_value(file_path: str, column: str, values: list[str], sheet_name: str | None = None) -> dict:
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True)
+        ws = wb[sheet_name] if sheet_name else wb.active
+        headers = [c.value for c in next(ws.iter_rows(max_row=1))]
+        if column not in headers:
+            return {"error": f"Column '{column}' not found. Available columns: {headers}"}
+        idx = headers.index(column)
+        matches = [
+            dict(zip(headers, row))
+            for row in ws.iter_rows(min_row=2, values_only=True)
+            if row[idx] in values
+        ]
+        return {"matches": matches}
+    except Exception as e:
+        return {"error": str(e)}
+
 SCHEMAS = [
     {
         "type": "function",
@@ -105,10 +122,32 @@ SCHEMAS = [
             },
         },
     },
+        {
+        "type": "function",
+        "function": {
+            "name": "get_rows_by_value",
+            "description": "Fetch specific rows where a column matches one of the given values -- e.g. get the rows for particular model names so they can be compared. Use this instead of read_excel_data whenever you know which specific items you need.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the .xlsx file"},
+                    "column": {"type": "string", "description": "Exact column header to match against, e.g. 'Model Name'"},
+                    "values": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "The values to look up, e.g. ['C 300 Sedan', 'E 350 4MATIC']",
+                    },
+                    "sheet_name": {"type": "string", "description": "Optional sheet name; defaults to active sheet"},
+                },
+                "required": ["file_path", "column", "values"],
+            },
+        },
+    },
 ]
 
 REGISTRY = {
     "read_excel_data": read_excel_data,
     "update_excel_data": update_excel_data,
     "summarize_column": summarize_column,
+    "get_rows_by_value": get_rows_by_value,
 }

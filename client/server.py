@@ -37,7 +37,20 @@ async def health():
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
-    messages = [m.model_dump() for m in request.messages]
+    FILE_PATH = "/app/data/Comprehensive Mercedes-Benz Models & Pricing Directory V2.xlsx"  # match your actual container path
+    system_prompt = {
+        "role": "system",
+        "content": (
+            f"You have access to an Excel database at '{FILE_PATH}'. "
+            "Use get_rows_by_value to look up specific rows (e.g. specific model names) "
+            "when comparing or answering about particular items, "
+            "summarize_column for totals/averages/min/max, "
+            "read_excel_data only when you need the entire sheet, "
+            "and update_excel_data to write changes. "
+            "Never guess values — always call a tool to get real data first."
+        ),
+    }
+    messages = [system_prompt] + [m.model_dump() for m in request.messages]
 
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         for _ in range(5):  # safety cap so it can't loop forever
