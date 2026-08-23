@@ -62,7 +62,7 @@ def get_rows_by_value(file_path: str, column: str, values: list[str], sheet_name
         matches = [
             dict(zip(headers, row))
             for row in ws.iter_rows(min_row=2, values_only=True)
-            if row[idx] in values
+            if any(v.lower() in str(row[idx]).lower() for v in values)
         ]
         return {"matches": matches}
     except Exception as e:

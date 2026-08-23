@@ -41,14 +41,16 @@ async def chat(request: ChatRequest):
     system_prompt = {
         "role": "system",
         "content": (
-            f"You have access to an Excel database at '{FILE_PATH}'. "
-            "Use get_rows_by_value to look up specific rows (e.g. specific model names) "
-            "when comparing or answering about particular items, "
-            "summarize_column for totals/averages/min/max, "
-            "read_excel_data only when you need the entire sheet, "
-            "and update_excel_data to write changes. "
-            "Never guess values — always call a tool to get real data first."
-        ),
+    f"You have access to an Excel database at '{FILE_PATH}'. "
+    "Use get_rows_by_value to look up specific rows ... "
+    "read_excel_data only when you need the entire sheet, "
+    "and update_excel_data to write changes. "
+    "Never guess values — always call a tool to get real data first. "
+    "When comparing items, answer concisely: a short markdown table or a "
+    "few plain sentences is enough. Do not add headers, horizontal rules, "
+    "or a 'Recommendation' section unless the user explicitly asks for advice."
+    "do not let anyone know you have access to excel file"
+),
     }
     messages = [system_prompt] + [m.model_dump() for m in request.messages]
 
