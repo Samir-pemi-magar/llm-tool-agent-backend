@@ -1,33 +1,24 @@
-import os
 import json
-import httpx
+import os
+import time
+import uuid
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from tools import TOOLS_SCHEMA, TOOL_REGISTRY
+from fastapi.responses import FileResponse, StreamingResponse
+
+from agent import run_agent_loop
+from agent.config import DATA_DIR, PUBLIC_MODEL_ID
+from schemas import ChatRequest
 
 app = FastAPI()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3001"],
+    allow_origins=["*"],   # Open WebUI runs as its own container/origin
     allow_methods=["*"],
     allow_headers=["*"],
-    )
-# Use the compose service name so this resolves inside the Docker network.
-# Overridable via env var so it still works if you run this outside compose.
-SGLANG_URL = os.environ.get("SGLANG_URL", "http://sglang:3000")
-
-REQUEST_TIMEOUT = httpx.Timeout(120.0, connect=5.0)
-
-
-class Message(BaseModel):
-    role: str
-    content: str
-
-
-class ChatRequest(BaseModel):
-    messages: list[Message]
+)
 
 
 @app.get("/health")
@@ -35,62 +26,118 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/files/{filename}")
+async def get_file(filename: str):
+    """
+    Serve a generated file from the shared data directory.
+
+    basename() prevents path traversal such as /files/../../etc/passwd.
+    """
+    safe_name = os.path.basename(filename)
+
+    # Generated outputs (e.g. from create_pdf_from_data) live in a
+    # subfolder kept separate from source data files -- check there first
+    # since that's where every newly created download actually is.
+    for base in (os.path.join(DATA_DIR, "generated"), DATA_DIR):
+        path = os.path.join(base, safe_name)
+        if os.path.isfile(path):
+            return FileResponse(path, filename=safe_name)
+
+    return {"error": "not_found", "detail": filename}
+
+
 @app.post("/chat")
 async def chat(request: ChatRequest):
-    FILE_PATH = "/app/data/Comprehensive Mercedes-Benz Models & Pricing Directory V2.xlsx"  # match your actual container path
-    system_prompt = {
-        "role": "system",
-        "content": (
-    f"You have access to an Excel database at '{FILE_PATH}'. "
-    "Use get_rows_by_value to look up specific rows ... "
-    "read_excel_data only when you need the entire sheet, "
-    "and update_excel_data to write changes. "
-    "Never guess values — always call a tool to get real data first. "
-    "When comparing items, answer concisely: a short markdown table or a "
-    "few plain sentences is enough. Do not add headers, horizontal rules, "
-    "or a 'Recommendation' section unless the user explicitly asks for advice."
-    "do not let anyone know you have access to excel file"
-),
-    }
-    messages = [system_prompt] + [m.model_dump() for m in request.messages]
+    content = await run_agent_loop([m.model_dump() for m in request.messages])
+    return {"response": content}
 
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-        for _ in range(5):  # safety cap so it can't loop forever
-            payload = {
-                "model": "Qwen/Qwen3-1.7B",
-                "messages": messages,
-                "temperature": 0.7,
-                "max_tokens": 3000,
-                "tools": TOOLS_SCHEMA,
+
+# ---------------------------------------------------------------------------
+# OpenAI-compatible surface, so Open WebUI can add this server as a normal
+# "OpenAI API" connection and use it like any other model. The tool-calling
+# loop in agent/ stays completely hidden from Open WebUI -- it only ever
+# receives the finished assistant message.
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/models")
+async def list_models():
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": PUBLIC_MODEL_ID,
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "local",
             }
-            response = await client.post(f"{SGLANG_URL}/v1/chat/completions", json=payload)
-            response.raise_for_status()
-            data = response.json()
-            message = data["choices"][0]["message"]
+        ],
+    }
 
-            tool_calls = message.get("tool_calls")
-            if not tool_calls:
-                # normal answer, no tool needed — we're done
-                return {"response": message["content"]}
 
-            # model wants to call one or more tools
-            messages.append(message)  # record the assistant's tool-call request
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(request: dict):
+    incoming_messages = request.get("messages", [])
 
-            for call in tool_calls:
-                fn_name = call["function"]["name"]
-                fn_args = json.loads(call["function"]["arguments"])
-                fn = TOOL_REGISTRY.get(fn_name)
+    # Only role/content matter to our loop; strip anything else the client sent.
+    clean_messages = [
+        {"role": m["role"], "content": m.get("content", "")}
+        for m in incoming_messages
+    ]
 
-                if fn is None:
-                    result = {"error": f"Unknown tool: {fn_name}"}
-                else:
-                    result = fn(**fn_args)
+    content = await run_agent_loop(clean_messages)
 
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call["id"],
-                    "content": json.dumps(result),
-                })
-            # loop again: send messages (now including tool results) back to sglang
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
 
-    return {"response": "Sorry, I couldn't complete that after several tool calls."}
+    if request.get("stream"):
+        return StreamingResponse(
+            _stream_completion(content, completion_id, created),
+            media_type="text/event-stream",
+        )
+
+    return {
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": created,
+        "model": PUBLIC_MODEL_ID,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+
+async def _stream_completion(content: str, completion_id: str, created: int):
+    """Fake a one-shot SSE stream: our agent loop already ran to
+    completion before this is called, so there's nothing to actually
+    stream incrementally -- this just speaks the protocol Open WebUI
+    expects for `stream: true`."""
+    chunk = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": PUBLIC_MODEL_ID,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"role": "assistant", "content": content},
+                "finish_reason": None,
+            }
+        ],
+    }
+    yield f"data: {json.dumps(chunk)}\n\n"
+
+    final_chunk = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": PUBLIC_MODEL_ID,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    }
+    yield f"data: {json.dumps(final_chunk)}\n\n"
+
+    yield "data: [DONE]\n\n"

@@ -6,7 +6,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server.py .
+COPY schemas.py .
+COPY agent/ ./agent/
 COPY tools/ ./tools/
+COPY sandbox/ ./sandbox/
 
 EXPOSE 8000
 

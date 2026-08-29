@@ -1,84 +1,120 @@
-import openpyxl
+"""
+Excel tool definitions for the LLM.
 
-def read_excel_data(file_path: str, sheet_name: str | None = None) -> dict:
-    try:
-        wb = openpyxl.load_workbook(file_path, data_only=True)
-        ws = wb[sheet_name] if sheet_name else wb.active
-        rows = [[cell.value for cell in row] for row in ws.iter_rows()]
-        return {"sheet": ws.title, "rows": rows}
-    except Exception as e:
-        return {"error": str(e)}
+This file does not touch openpyxl or the filesystem directly.
+It defines the tools the LLM may call and forwards execution to
+the sandbox.
 
-def update_excel_data(file_path: str, cell: str, value: str, sheet_name: str | None = None) -> dict:
-    try:
-        wb = openpyxl.load_workbook(file_path)
-        ws = wb[sheet_name] if sheet_name else wb.active
-        ws[cell] = value
-        wb.save(file_path)
-        return {"status": "ok", "updated": cell, "value": value}
-    except Exception as e:
-        return {"error": str(e)}
+All actual Excel work, path validation, and resource limits happen
+inside client/sandbox/.
+"""
 
-def summarize_column(file_path: str, column: str, operation: str, sheet_name: str | None = None) -> dict:
-    try:
-        wb = openpyxl.load_workbook(file_path, data_only=True)
-        ws = wb[sheet_name] if sheet_name else wb.active
+from sandbox import execute_tool
 
-        headers = [c.value for c in next(ws.iter_rows(max_row=1))]
-        if column not in headers:
-            return {"error": f"Column '{column}' not found. Available columns: {headers}"}
-        idx = headers.index(column)
 
-        values = [
-            row[idx] for row in ws.iter_rows(min_row=2, values_only=True)
-            if row[idx] is not None
-        ]
+def list_sheets(file_path: str) -> dict:
+    return execute_tool(
+        "list_sheets",
+        {
+            "file_path": file_path,
+        },
+    )
 
-        if operation == "sum":
-            result = sum(values)
-        elif operation == "count":
-            result = len(values)
-        elif operation == "average":
-            result = sum(values) / len(values) if values else 0
-        elif operation == "min":
-            result = min(values)
-        elif operation == "max":
-            result = max(values)
-        else:
-            return {"error": f"Unknown operation: {operation}. Use sum, count, average, min, or max."}
 
-        return {"column": column, "operation": operation, "result": result}
-    except Exception as e:
-        return {"error": str(e)}
+def read_excel_data(file_path: str, sheet_name: str) -> dict:
+    return execute_tool(
+        "read_excel_data",
+        {
+            "file_path": file_path,
+            "sheet_name": sheet_name,
+        },
+    )
 
-def get_rows_by_value(file_path: str, column: str, values: list[str], sheet_name: str | None = None) -> dict:
-    try:
-        wb = openpyxl.load_workbook(file_path, data_only=True)
-        ws = wb[sheet_name] if sheet_name else wb.active
-        headers = [c.value for c in next(ws.iter_rows(max_row=1))]
-        if column not in headers:
-            return {"error": f"Column '{column}' not found. Available columns: {headers}"}
-        idx = headers.index(column)
-        matches = [
-            dict(zip(headers, row))
-            for row in ws.iter_rows(min_row=2, values_only=True)
-            if any(v.lower() in str(row[idx]).lower() for v in values)
-        ]
-        return {"matches": matches}
-    except Exception as e:
-        return {"error": str(e)}
+
+def update_excel_data(
+    file_path: str,
+    cell: str,
+    value: str,
+    sheet_name: str,
+) -> dict:
+    return execute_tool(
+        "update_excel_data",
+        {
+            "file_path": file_path,
+            "cell": cell,
+            "value": value,
+            "sheet_name": sheet_name,
+        },
+    )
+
+
+def append_row_data(
+    file_path: str,
+    row_data: dict,
+    sheet_name: str,
+) -> dict:
+    return execute_tool(
+        "append_row_data",
+        {
+            "file_path": file_path,
+            "row_data": row_data,
+            "sheet_name": sheet_name,
+        },
+    )
+
+
+def summarize_column(
+    file_path: str,
+    column: str,
+    operation: str,
+    sheet_name: str,
+) -> dict:
+    return execute_tool(
+        "summarize_column",
+        {
+            "file_path": file_path,
+            "column": column,
+            "operation": operation,
+            "sheet_name": sheet_name,
+        },
+    )
+
+
+def get_rows_by_value(
+    file_path: str,
+    column: str,
+    values: list[str],
+    sheet_name: str,
+) -> dict:
+    return execute_tool(
+        "get_rows_by_value",
+        {
+            "file_path": file_path,
+            "column": column,
+            "values": values,
+            "sheet_name": sheet_name,
+        },
+    )
+
 
 SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "read_excel_data",
-            "description": "Read all rows from an Excel workbook sheet",
+            "name": "list_sheets",
+            "description": (
+                "List every sheet in an Excel workbook and identify the active "
+                "sheet. Call this first when working with a workbook unless the "
+                "correct sheet has already been explicitly established during "
+                "the current task."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string", "description": "Path to the .xlsx file"},
-                    "sheet_name": {"type": "string", "description": "Optional sheet name; defaults to active sheet"},
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the .xlsx file",
+                    },
                 },
                 "required": ["file_path"],
             },
@@ -87,17 +123,119 @@ SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "update_excel_data",
-            "description": "Update a single cell in an Excel workbook and save it",
+            "name": "read_excel_data",
+            "description": (
+                "Read data from one specific Excel worksheet. Always pass the "
+                "exact sheet_name. Use this to inspect a sheet's actual headers "
+                "before constructing row_data for a new record or when the full "
+                "sheet contents are needed."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string"},
-                    "cell": {"type": "string", "description": "Cell reference, e.g. 'B2'"},
-                    "value": {"type": "string"},
-                    "sheet_name": {"type": "string"},
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the .xlsx file",
+                    },
+                    "sheet_name": {
+                        "type": "string",
+                        "description": (
+                            "Exact worksheet name. Required. Never rely on the "
+                            "workbook's active/default sheet."
+                        ),
+                    },
                 },
-                "required": ["file_path", "cell", "value"],
+                "required": ["file_path", "sheet_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_excel_data",
+            "description": (
+                "Edit one specific cell in an existing row and save the workbook. "
+                "Use this only when the exact target cell is known and the row "
+                "already exists. Do not use this to create a new sale, entry, or "
+                "record because it can overwrite existing data. Use "
+                "append_row_data for new records. Always pass sheet_name."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the .xlsx file",
+                    },
+                    "cell": {
+                        "type": "string",
+                        "description": "Exact cell reference, for example B2",
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "New value for the cell",
+                    },
+                    "sheet_name": {
+                        "type": "string",
+                        "description": (
+                            "Exact worksheet name. Required. Never rely on the "
+                            "active/default sheet."
+                        ),
+                    },
+                },
+                "required": [
+                    "file_path",
+                    "cell",
+                    "value",
+                    "sheet_name",
+                ],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "append_row_data",
+            "description": (
+                "Add a brand-new record to a specific worksheet. Use this when "
+                "the user asks to add, log, or record something new. The "
+                "sheet_name is required. row_data keys must exactly match the "
+                "headers on that sheet. Inspect the destination sheet's headers "
+                "before calling this tool. Do not append sales records to "
+                "pricing, catalog, inventory, or reference sheets."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the .xlsx file",
+                    },
+                    "row_data": {
+                        "type": "object",
+                        "description": (
+                            "Mapping of exact worksheet column header names to "
+                            "values. Only use headers that actually exist on the "
+                            "selected sheet. Example: "
+                            "{'Sale Date': '2026-08-28', "
+                            "'Model Name': 'E 350 Sedan', "
+                            "'Units Sold': 2, "
+                            "'Sale Price/Unit (USD)': 53760}"
+                        ),
+                    },
+                    "sheet_name": {
+                        "type": "string",
+                        "description": (
+                            "Exact destination worksheet name. Required. Never "
+                            "rely on the workbook's active/default sheet."
+                        ),
+                    },
+                },
+                "required": [
+                    "file_path",
+                    "row_data",
+                    "sheet_name",
+                ],
             },
         },
     },
@@ -105,49 +243,112 @@ SCHEMAS = [
         "type": "function",
         "function": {
             "name": "summarize_column",
-            "description": "Compute a summary statistic (sum, count, average, min, or max) over a named column in an Excel sheet. Use this instead of read_excel_data when the user asks for a total, count, or average, since it computes an exact number instead of relying on reading raw rows.",
+            "description": (
+                "Compute an exact summary statistic over a named column on one "
+                "specific worksheet. Use this for totals, counts, averages, "
+                "minimums, or maximums instead of manually estimating from raw "
+                "rows. Always pass the exact sheet_name."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string", "description": "Path to the .xlsx file"},
-                    "column": {"type": "string", "description": "Exact column header name, e.g. 'Units Sold'"},
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the .xlsx file",
+                    },
+                    "column": {
+                        "type": "string",
+                        "description": (
+                            "Exact column header name, for example 'Units Sold'"
+                        ),
+                    },
                     "operation": {
                         "type": "string",
-                        "enum": ["sum", "count", "average", "min", "max"],
-                        "description": "The statistic to compute",
+                        "enum": [
+                            "sum",
+                            "count",
+                            "average",
+                            "min",
+                            "max",
+                        ],
+                        "description": "The summary operation to perform",
                     },
-                    "sheet_name": {"type": "string", "description": "Optional sheet name; defaults to active sheet"},
+                    "sheet_name": {
+                        "type": "string",
+                        "description": (
+                            "Exact worksheet name. Required. Never rely on the "
+                            "active/default sheet."
+                        ),
+                    },
                 },
-                "required": ["file_path", "column", "operation"],
+                "required": [
+                    "file_path",
+                    "column",
+                    "operation",
+                    "sheet_name",
+                ],
             },
         },
     },
-        {
+    {
         "type": "function",
         "function": {
             "name": "get_rows_by_value",
-            "description": "Fetch specific rows where a column matches one of the given values -- e.g. get the rows for particular model names so they can be compared. Use this instead of read_excel_data whenever you know which specific items you need.",
+            "description": (
+                "Fetch rows from one specific worksheet where a named column "
+                "matches one or more requested values. Use this for targeted "
+                "lookups instead of reading an entire sheet. Always pass the "
+                "exact sheet_name."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string", "description": "Path to the .xlsx file"},
-                    "column": {"type": "string", "description": "Exact column header to match against, e.g. 'Model Name'"},
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the .xlsx file",
+                    },
+                    "column": {
+                        "type": "string",
+                        "description": (
+                            "Exact column header to search, for example "
+                            "'Model Name'"
+                        ),
+                    },
                     "values": {
                         "type": "array",
-                        "items": {"type": "string"},
-                        "description": "The values to look up, e.g. ['C 300 Sedan', 'E 350 4MATIC']",
+                        "items": {
+                            "type": "string",
+                        },
+                        "description": (
+                            "Values to search for, for example "
+                            "['E 350 Sedan', 'GLC 300 SUV']"
+                        ),
                     },
-                    "sheet_name": {"type": "string", "description": "Optional sheet name; defaults to active sheet"},
+                    "sheet_name": {
+                        "type": "string",
+                        "description": (
+                            "Exact worksheet name. Required. Never rely on the "
+                            "active/default sheet."
+                        ),
+                    },
                 },
-                "required": ["file_path", "column", "values"],
+                "required": [
+                    "file_path",
+                    "column",
+                    "values",
+                    "sheet_name",
+                ],
             },
         },
     },
 ]
 
+
 REGISTRY = {
+    "list_sheets": list_sheets,
     "read_excel_data": read_excel_data,
     "update_excel_data": update_excel_data,
+    "append_row_data": append_row_data,
     "summarize_column": summarize_column,
     "get_rows_by_value": get_rows_by_value,
 }

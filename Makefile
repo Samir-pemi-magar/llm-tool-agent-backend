@@ -1,6 +1,6 @@
-.PHONY: up down logs
+.PHONY: up down logs sandbox-build
 
-up:
+up: sandbox-build
 	docker compose up --build
 
 down:
@@ -8,3 +8,6 @@ down:
 
 logs:
 	docker compose logs -f sglang
+
+sandbox-build:
+	docker build -t sandbox-excel:latest ./sandbox_runner
